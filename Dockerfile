@@ -3,9 +3,19 @@ ARG OPENSSL_VERSION='3.5.2'
 
 FROM mirror.gcr.io/84codes/crystal:1.16.3-alpine AS builder
 
-RUN apk add --no-cache sqlite-static yaml-static
-RUN apk del openssl-dev openssl-libs-static
-RUN apk add --no-cache curl perl linux-headers build-base
+# Add build tools + runtime and development packages required for static linking
+RUN apk add --no-cache \
+      sqlite-static yaml-static \
+      curl perl linux-headers build-base pkgconfig \
+      zlib zlib-dev \
+      libxml2 libxml2-dev \
+      yaml yaml-dev \
+      pcre2 pcre2-dev \
+      xz xz-dev \
+      musl-dev
+
+# remove distro openssl dev/libs so we use the one we build
+RUN apk del openssl-dev openssl-libs-static || true
 
 ARG release
 
@@ -14,11 +24,11 @@ WORKDIR /invidious
 ARG OPENSSL_VERSION
 RUN curl -Ls "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz" | tar xz
 
-# Build OpenSSL with minimal footprint flags
+# Build OpenSSL with minimal-footprint flags and install into /usr so pkg-config finds it
 RUN cd openssl-${OPENSSL_VERSION} && \
     CFLAGS="-Os -DOPENSSL_SMALL_FOOTPRINT -ffunction-sections -fdata-sections" \
     LDFLAGS="-Wl,--gc-sections" \
-    ./Configure linux-x86_64 --openssldir=/etc/ssl \
+    ./Configure linux-x86_64 --prefix=/usr --openssldir=/etc/ssl \
       no-shared \
       no-async \
       no-engine \
@@ -33,8 +43,11 @@ RUN cd openssl-${OPENSSL_VERSION} && \
       no-mdc2 \
       no-whirlpool \
       && make -j$(nproc) && make install_sw && \
-    # strip static libs to reduce size
-    if command -v strip >/dev/null 2>&1; then strip /usr/local/lib/libcrypto.a /usr/local/lib/libssl.a || true; fi
+    # strip static libs (if present) to save space
+    if command -v strip >/dev/null 2>&1; then \
+      strip /usr/lib/libcrypto.a 2>/dev/null || true; \
+      strip /usr/lib/libssl.a 2>/dev/null || true; \
+    fi
 
 COPY ./shard.yml ./shard.yml
 COPY ./shard.lock ./shard.lock
@@ -51,13 +64,13 @@ COPY ./scripts/ ./scripts/
 COPY ./assets/ ./assets/
 COPY ./videojs-dependencies.yml ./videojs-dependencies.yml
 
-# Adjust PKG_CONFIG_PATH so Crystal's build can find the OpenSSL we installed
+# Build with dynamic linking (remove --static). PKG_CONFIG_PATH defaults will find /usr/lib/pkgconfig now.
 RUN --mount=type=cache,target=/root/.cache/crystal \
-        PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
+        PKG_CONFIG_PATH=/usr/lib/pkgconfig \
         crystal build ./src/invidious.cr \
         --release -s -p -t --mcpu=x86-64-v2 \
-        --static --warnings all \
-        --link-flags "-lxml2 -llzma";
+        --warnings all \
+        --link-flags "-lxml2 -llzma"
 
 FROM mirror.gcr.io/alpine:3.22
 RUN apk add --no-cache rsvg-convert ttf-opensans tini tzdata
