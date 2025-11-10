@@ -3,7 +3,7 @@ ARG OPENSSL_VERSION='3.5.2'
 
 FROM mirror.gcr.io/84codes/crystal:1.16.3-alpine AS builder
 
-# Add build tools + runtime and development packages required for static linking
+# build tools + runtime and development packages required for linking
 RUN apk add --no-cache \
       sqlite-static yaml-static \
       curl perl linux-headers build-base pkgconfig \
@@ -17,25 +17,22 @@ RUN apk add --no-cache \
 # remove distro openssl dev/libs so we use the one we build
 RUN apk del openssl-dev openssl-libs-static || true
 
-ARG release
-
 WORKDIR /invidious
 
 ARG OPENSSL_VERSION
 RUN curl -Ls "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz" | tar xz
 
-# Build OpenSSL with minimal-footprint flags and install into /usr so pkg-config finds it
+# Build OpenSSL with minimal-footprint compiler flags but keep compatibility symbols
 RUN cd openssl-${OPENSSL_VERSION} && \
     CFLAGS="-Os -DOPENSSL_SMALL_FOOTPRINT -ffunction-sections -fdata-sections" \
     LDFLAGS="-Wl,--gc-sections" \
-    ./Configure linux-x86_64 --prefix=/usr --openssldir=/etc/ssl \
-      no-shared \
+    ./Configure linux-x86_64 shared --prefix=/usr --openssldir=/etc/ssl \
+      # keep compatibility APIs (do NOT use no-deprecated / no-legacy)
       no-async \
       no-engine \
       no-dso \
       no-comp \
       no-weak-ssl-ciphers \
-      no-deprecated \
       no-idea \
       no-rc4 \
       no-rc2 \
@@ -43,7 +40,7 @@ RUN cd openssl-${OPENSSL_VERSION} && \
       no-mdc2 \
       no-whirlpool \
       && make -j$(nproc) && make install_sw && \
-    # strip static libs (if present) to save space
+    # strip static libs if present (optional)
     if command -v strip >/dev/null 2>&1; then \
       strip /usr/lib/libcrypto.a 2>/dev/null || true; \
       strip /usr/lib/libssl.a 2>/dev/null || true; \
@@ -64,7 +61,7 @@ COPY ./scripts/ ./scripts/
 COPY ./assets/ ./assets/
 COPY ./videojs-dependencies.yml ./videojs-dependencies.yml
 
-# Build with dynamic linking (remove --static). PKG_CONFIG_PATH defaults will find /usr/lib/pkgconfig now.
+# Build with dynamic linking. PKG_CONFIG_PATH will find /usr/lib/pkgconfig now.
 RUN --mount=type=cache,target=/root/.cache/crystal \
         PKG_CONFIG_PATH=/usr/lib/pkgconfig \
         crystal build ./src/invidious.cr \
