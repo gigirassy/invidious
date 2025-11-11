@@ -2,6 +2,7 @@
 ARG OPENSSL_VERSION=3.5.2
 ARG ZLIB_VERSION=1.3.1
 ARG XZ_VERSION=5.8.1
+ARG LIBXML2_VERSION=2.14.5
 
 FROM mirror.gcr.io/84codes/crystal:1.16.3-alpine AS builder
 
@@ -39,8 +40,8 @@ RUN set -eux; \
 
 ### 3) libxml2 (static)
 RUN set -eux; \
-    curl -fsSL "https://download.gnome.org/sources/libxml2/2.9/libxml2-2.9.9.tar.xz" | tar xz; \
-    cd "libxml2-2.9.9"; \
+    curl -fsSL "https://download.gnome.org/sources/libxml2/2.14/libxml2-${LIBXML2_VERSION}.tar.xz" | tar xJ; \
+    cd "libxml2-${LIBXML2_VERSION}"; \
     ./configure --prefix=$PREFIX --without-python --enable-static --disable-shared --with-zlib=$PREFIX; \
     make -j$(nproc); \
     make install
