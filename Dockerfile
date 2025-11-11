@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.4
 ARG OPENSSL_VERSION=3.5.2
-ARG ZLIB_VERSION=1.3.1
-ARG XZ_VERSION=5.8.1
+ARG ZLIB_VERSION=1.2.13
+ARG XZ_VERSION=5.6.2
 ARG LIBXML2_VERSION=2.14.5
 
 FROM mirror.gcr.io/84codes/crystal:1.16.3-alpine AS builder
@@ -15,14 +15,15 @@ ENV PREFIX=/usr/local
 ENV PATH=$PREFIX/bin:$PATH
 ENV PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH
 
+# Build deps only in builder
 RUN apk add --no-cache \
-      build-base curl perl linux-headers autoconf automake libtool pkgconfig musl-dev \
-      pngquant jpeg-dev libpng-dev freetype-dev fontconfig-dev \
-      sqlite-static yaml-static rsvg-convert
+    build-base curl perl linux-headers autoconf automake libtool pkgconfig musl-dev \
+    pngquant jpeg-dev libpng-dev freetype-dev fontconfig-dev \
+    sqlite-static yaml-static rsvg-convert xz
 
 WORKDIR /usr/src
 
-### 1) zlib (static)
+### Build zlib (static)
 RUN set -eux; \
     curl -fsSL "https://zlib.net/zlib-${ZLIB_VERSION}.tar.gz" | tar xz; \
     cd "zlib-${ZLIB_VERSION}"; \
@@ -30,7 +31,7 @@ RUN set -eux; \
     make -j$(nproc); \
     make install
 
-### 2) xz / liblzma (static)
+### Build xz (liblzma) (static)
 RUN set -eux; \
     curl -fsSL "https://tukaani.org/xz/xz-${XZ_VERSION}.tar.gz" | tar xz; \
     cd "xz-${XZ_VERSION}"; \
@@ -38,7 +39,7 @@ RUN set -eux; \
     make -j$(nproc); \
     make install
 
-### 3) libxml2 (static)
+### Build libxml2 (static) — use .tar.xz and tar xJ
 RUN set -eux; \
     curl -fsSL "https://download.gnome.org/sources/libxml2/2.14/libxml2-${LIBXML2_VERSION}.tar.xz" | tar xJ; \
     cd "libxml2-${LIBXML2_VERSION}"; \
@@ -46,15 +47,17 @@ RUN set -eux; \
     make -j$(nproc); \
     make install
 
-### 4) OpenSSL (build & install)
+### Build OpenSSL into /usr/local
 RUN set -eux; \
     curl -fsSL "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz" | tar xz; \
     cd "openssl-${OPENSSL_VERSION}"; \
     ./Configure linux-x86_64 --prefix=$PREFIX --openssldir=/etc/ssl && \
     make -j$(nproc) && make install_sw
 
+### Prepare project files in builder (ensure these COPYs exist in repo)
 WORKDIR /invidious
 
+# Must copy config/sql and locales into builder BEFORE building the binary.
 COPY ./shard.yml ./shard.yml
 COPY ./shard.lock ./shard.lock
 RUN shards install --production
@@ -63,16 +66,23 @@ COPY ./src/ ./src/
 COPY ./.git/ ./.git/
 COPY ./scripts/ ./scripts/
 COPY ./assets/ ./assets/
+COPY ./config/config.* ./config/
+# <-- Important: copy the SQL config and locales so they exist in builder
+COPY ./config/sql/ ./config/sql/
+COPY ./locales/ ./locales/
 COPY ./videojs-dependencies.yml ./videojs-dependencies.yml
 
-# Pre-render SVGs
+# Guarantee those directories exist even if empty (avoids COPY failures later)
+RUN mkdir -p /invidious/config/sql /invidious/locales
+
+# Pre-render SVGs into raster folder so we don't need librsvg/cairo at runtime
 RUN mkdir -p /invidious/assets/raster; \
     for svg in $(find assets -name '*.svg' || true); do \
       out="/invidious/assets/raster/$(basename "${svg%.*}.png")"; \
       rsvg-convert "$svg" -o "$out" || echo "warning: rsvg-convert failed $svg"; \
     done
 
-# Build Crystal binary statically and strip
+# Build Crystal binary statically, strip, and link libxml2/xz/zlib/openssl statically
 RUN --mount=type=cache,target=/root/.cache/crystal \
     PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig \
     crystal build ./src/invidious.cr \
@@ -80,23 +90,23 @@ RUN --mount=type=cache,target=/root/.cache/crystal \
       --static --warnings all \
       --link-flags "-lxml2 -llzma -lz -lssl -lcrypto -ldl -lpthread -lm"
 
-RUN if command -v ldd >/dev/null 2>&1; then ldd ./invidious || true; fi
+# Static binary check — use `file` and `readelf` instead of ldd (ldd fails on fully static)
+RUN file ./invidious && readelf -h ./invidious || true
 
-### Runtime image
+### Final runtime image
 FROM mirror.gcr.io/alpine:3.22 AS runtime
 
-# Remove default openssl package if present
+# Remove default openssl package (if present) to avoid depending on OS libssl/libcrypto
 RUN apk del --no-cache openssl openssl-dev || true
 
-# Only install absolutely needed runtime packages
-RUN apk add --no-cache \
-      tini tzdata ttf-opensans ca-certificates
+RUN apk add --no-cache tini tzdata ttf-opensans ca-certificates
 
 WORKDIR /invidious
 
 RUN addgroup -g 1000 -S invidious && \
     adduser -u 1000 -S invidious -G invidious
 
+# Copy minimal runtime files from builder (directories now guaranteed to exist)
 COPY --from=builder --chown=invidious /invidious/invidious .
 COPY --from=builder --chown=invidious /invidious/assets/raster ./assets/raster
 COPY --from=builder --chown=invidious /invidious/assets ./assets
